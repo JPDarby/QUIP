@@ -98,7 +98,7 @@ module linearalgebra_module
    endinterface d3coordination_function
    public :: d3coordination_function
 
-  public :: la_matrix, la_matrix_factorise, la_matrix_qr_factorise, LA_Matrix_QR_Solve_Vector, la_matrix_logdet, la_matrix_qr_inverse, la_matrix_inverse, LA_Matrix_Expand_Symmetrically, la_matrix_svd, la_matrix_svd_allocate, la_matrix_pseudoinverse
+  public :: la_matrix, la_matrix_factorise, la_matrix_qr_factorise, LA_Matrix_QR_Solve_Vector, la_matrix_logdet, la_matrix_qr_inverse, la_matrix_inverse, LA_Matrix_Expand_Symmetrically, la_matrix_svd, la_matrix_svd_allocate, la_matrix_pseudoinverse, Factored_LA_Matrix_QR_Solve_Vector
 
   public :: initialise, assignment(=), finalise, matrix_solve, matrix_qr_solve, find, sign
   public :: operator(.feq.), operator(.fne.), operator(.fgt.), operator(.fle.), operator(.flt.), operator(.fge.)
@@ -155,7 +155,7 @@ module linearalgebra_module
   endinterface Matrix_Solve
 
   interface Matrix_QR_Solve
-    module procedure LA_Matrix_QR_Solve_Vector, LA_Matrix_QR_Solve_Matrix, Fixed_LA_Matrix_QR_Solve_Vector
+    module procedure LA_Matrix_QR_Solve_Vector, LA_Matrix_QR_Solve_Matrix
   endinterface Matrix_QR_Solve
 
   interface find
@@ -2841,67 +2841,91 @@ CONTAINS
 
   endsubroutine LA_Matrix_GetQR
 
-  subroutine Fixed_LA_Matrix_QR_Solve_Vector(factor, tau, vector, vec_result)
-   !supply factor and tau from QR factorisation only
-   real(dp), dimension(:), intent(in) :: vector
-   real(dp), dimension(:), intent(out) :: vec_result
-   real(dp), dimension(:, :), intent(in) :: factor
-   real(dp), dimension(:), intent(in)    :: tau
+   subroutine Factored_LA_Matrix_QR_Solve_Matrix(this,matrix,result,error)
+     type(LA_Matrix), intent(in) :: this
+     real(qp), dimension(:,:), intent(in) :: matrix
+     real(qp), dimension(:,:), intent(out) :: result
+     real(qp), dimension(:,:), allocatable :: orig_factor
+     integer, intent(out), optional :: error
 
-   integer :: n, m, o, lwork, info, i, j
-   real(dp), dimension(:), allocatable :: work
-   real(dp), dimension(:, :), allocatable :: matrix, my_result
-   !real(dp) :: start, mid, end
+     real(qp), dimension(:,:), allocatable :: my_result
+     integer :: info, i, j, n, o
+      real(dp), dimension(:), allocatable :: work
+      integer :: lwork
 
-   !reshape vector into matrix
-   n = size(vector)
-   allocate(matrix(n, 1))
-   matrix = reshape(vector,(/n,1/))
 
-   ! sizes, n is already set
-   o = 1
-   m = size(factor, 2)
+     INIT_ERROR(error)
 
-   allocate(my_result(n, o))
-   my_result = matrix
+     if(this%factorised == NOT_FACTORISED .or. this%factorised /= QR ) then
+        RAISE_ERROR('Fixed_LA_Matrix_QR_Solve_Matrix: matrix not QR-factorised',error)
+     endif
 
-   ! start = factor(1,1)
+     n = size(matrix,1)
+     o = size(matrix,2)
+     call check_size('result', result, (/this%m,o/),'LA_Matrix_QR_Solve_Matrix',error)
 
-   ! copied this directly from LA_Matrix_QR_Solve_Matrix in linearalgebra
-   lwork = -1
-   allocate(work(1))
-   call dormqr('L', 'T', n, o, m, factor, n, tau, my_result, n, work, lwork, info)
-   lwork = nint(work(1))
-   deallocate(work)
+     if( n /= this%n ) then
+        RAISE_ERROR('Factored_LA_Matrix_QR_Solve_Matrix: dimensions of Q and matrix do not match.',error)
+     endif
 
-   !mid = factor(1,1)
+     allocate(my_result(n,o))
+     my_result = matrix
 
-   allocate(work(lwork))
-   call dormqr('L', 'T', n, o, m, factor, n, tau, my_result, n, work, lwork, info)
-   deallocate(work)
+     ! pass copy of factor to dormqr as it modifies it then restores it which doesn't work with multiple threads
+     allocate(orig_factor(size(this%factor, 1), size(this%factor, 2)))
+     orig_factor = this%factor
 
-   !end = factor(1,1)
-   !print*, "jpd47 in fixed", start, mid, end
-   ! NOTE WARNING TODO with OMP_NUM_THREADS > 1 factor gets modified between start and end
-   ! dormqr documentation says that  "A is modified by the routine but restored on exit." (A=factor)
 
-   if( info /= 0 ) then
-      print*, "paramater", info, "had an illegal value"
-   endif
+      lwork = -1
+      allocate(work(1))
+      call dormqr('L', 'T', this%n, o, this%m, orig_factor, this%n, this%tau, my_result, this%n, work, lwork, info)
+      lwork = nint(work(1))
+      deallocate(work)
 
-   do i = 1, o
-      do j = m, 2, -1
-         my_result(j,i) = my_result(j,i)/factor(j,j)
-         my_result(1:j-1,i) = my_result(1:j-1,i) - my_result(j,i)*factor(1:j-1,j)
+      allocate(work(lwork))
+      call dormqr('L', 'T', this%n, o, this%m, orig_factor, this%n, this%tau, my_result, this%n, work, lwork, info)
+      deallocate(work)
+
+      if( info /= 0 ) then
+         RAISE_ERROR('LA_Matrix_QR_QR_Solve_Matrix: '//(-info)//'-th parameter had an illegal value.',error)
+      endif
+
+      do i = 1, o
+         do j = this%m, 2, -1
+            my_result(j,i) = my_result(j,i)/this%factor(j,j)
+            my_result(1:j-1,i) = my_result(1:j-1,i) - my_result(j,i)*this%factor(1:j-1,j)
+         enddo
+         my_result(1,i) = my_result(1,i) / this%factor(1,1)
       enddo
-      my_result(1,i) = my_result(1,i) / factor(1,1)
-   enddo
 
-   !result = my_result(1:m,:)
-   vec_result = my_result(1:m, 1)
-   deallocate(my_result)
-   deallocate(matrix)
-endsubroutine
+      result = my_result(1:this%m,:)
+      deallocate(my_result)
+      deallocate(orig_factor)
+
+   endsubroutine Factored_LA_Matrix_QR_Solve_Matrix
+
+  subroutine Factored_LA_Matrix_QR_Solve_Vector(this,vector,result,error)
+     type(LA_Matrix), intent(in) :: this
+     real(qp), dimension(:), intent(in) :: vector
+     real(qp), dimension(:), intent(out) :: result
+     integer, intent(out), optional :: error
+
+     real(qp), dimension(:,:), allocatable :: my_result
+     integer :: n, m
+
+     INIT_ERROR(error)
+
+     n = size(vector)
+     m = size(result)
+
+     allocate(my_result(m,1))
+
+     call Factored_LA_Matrix_QR_Solve_Matrix(this,reshape(vector,(/n,1/)),my_result,error=error)
+     result = my_result(:,1)
+
+     deallocate(my_result)
+
+  endsubroutine Factored_LA_Matrix_QR_Solve_Vector
 
   subroutine LA_Matrix_QR_Solve_Matrix(this,matrix,result,error)
      type(LA_Matrix), intent(inout) :: this
